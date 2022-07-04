@@ -1,121 +1,93 @@
-﻿
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
+﻿#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
+#include <math.h>
 
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
+#define SIZE 256
+#define SHMEM_SIZE 256 
 
-__global__ void addKernel(int *c, const int *a, const int *b)
-{
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+__global__ void sum_reduction(int* v, int* v_r) {
+	// Allocate shared memory
+	__shared__ int partial_sum[SHMEM_SIZE];
+
+	// Calculate thread ID
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+	// Load elements AND do first add of reduction
+	// Vector now 2x as long as number of threads, so scale i
+	int i = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+
+	// Store first partial result instead of just the elements
+	partial_sum[threadIdx.x] = v[i] + v[i + blockDim.x];
+	__syncthreads();
+
+	// Start at 1/2 block stride and divide by two each iteration
+	for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+		// Each thread does work unless it is further than the stride
+		if (threadIdx.x < s) {
+			partial_sum[threadIdx.x] += partial_sum[threadIdx.x + s];
+		}
+		__syncthreads();
+	}
+
+	// Let the thread 0 for this block write it's result to main memory
+	// Result is inexed by this block
+	if (threadIdx.x == 0) {
+		v_r[blockIdx.x] = partial_sum[0];
+		printf("result: %d\n", partial_sum[0]);
+	}
 }
 
-int main()
-{
-    const int arraySize = 5;
-    const int a[arraySize] = { 1, 2, 3, 4, 5 };
-    const int b[arraySize] = { 10, 20, 30, 40, 50 };
-    int c[arraySize] = { 0 };
-
-    // Add vectors in parallel.
-    cudaError_t cudaStatus = addWithCuda(c, a, b, arraySize);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addWithCuda failed!");
-        return 1;
-    }
-
-    printf("{1,2,3,4,5} + {10,20,30,40,50} = {%d,%d,%d,%d,%d}\n",
-        c[0], c[1], c[2], c[3], c[4]);
-
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
-    cudaStatus = cudaDeviceReset();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceReset failed!");
-        return 1;
-    }
-
-    return 0;
+void initialize_vector(int* v, int n) {
+	for (int i = 0; i < n; i++) {
+		v[i] = 2;//rand() % 10;
+	}
 }
 
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size)
-{
-    int *dev_a = 0;
-    int *dev_b = 0;
-    int *dev_c = 0;
-    cudaError_t cudaStatus;
+int main() {
+	// Vector size
+	int n = 1 << 16;
+	size_t bytes = n * sizeof(int);
 
-    // Choose which GPU to run on, change this on a multi-GPU system.
-    cudaStatus = cudaSetDevice(0);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
-    }
+	// Original vector and result vector
+	int* h_v, * h_v_r;
+	int* d_v, * d_v_r;
 
-    // Allocate GPU buffers for three vectors (two input, one output)    .
-    cudaStatus = cudaMalloc((void**)&dev_c, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Allocate memory
+	h_v = (int*)malloc(bytes);
+	h_v_r = (int*)malloc(bytes);
+	cudaMalloc(&d_v, bytes);
+	cudaMalloc(&d_v_r, bytes);
 
-    cudaStatus = cudaMalloc((void**)&dev_a, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Initialize vector
+	initialize_vector(h_v, n);
 
-    cudaStatus = cudaMalloc((void**)&dev_b, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
+	// Copy to device
+	cudaMemcpy(d_v, h_v, bytes, cudaMemcpyHostToDevice);
 
-    // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// TB Size
+	int TB_SIZE = SIZE;
 
-    cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// Grid Size (cut in half) (No padding)
+	int GRID_SIZE = (n + TB_SIZE - 1) / TB_SIZE / 2;
 
-    // Launch a kernel on the GPU with one thread for each element.
-    addKernel<<<1, size>>>(dev_c, dev_a, dev_b);
+	// Call kernel
+	sum_reduction << <GRID_SIZE, TB_SIZE >> > (d_v, d_v_r);
 
-    // Check for any errors launching the kernel
-    cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-        goto Error;
-    }
-    
-    // cudaDeviceSynchronize waits for the kernel to finish, and returns
-    // any errors encountered during the launch.
-    cudaStatus = cudaDeviceSynchronize();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-        goto Error;
-    }
+	sum_reduction << <1, TB_SIZE >> > (d_v_r, d_v_r);
 
-    // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
+	// Copy to host;
+	cudaMemcpy(h_v_r, d_v_r, bytes, cudaMemcpyDeviceToHost);
 
-Error:
-    cudaFree(dev_c);
-    cudaFree(dev_a);
-    cudaFree(dev_b);
-    
-    return cudaStatus;
+	// Print the result
+	//printf("Accumulated result is %d \n", h_v_r[0]);
+	//scanf("Press enter to continue: ");
+	printf("result: %d\n", h_v_r[0]);
+	assert(h_v_r[0] == 65536 * 2);
+
+	printf("COMPLETED SUCCESSFULLY\n");
+
+	return 0;
 }
