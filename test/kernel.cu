@@ -54,7 +54,7 @@ __global__ void initCurand(curandState* state, unsigned long seed) {
 	curand_init(seed, idx, 0, &state[idx]);
 }
 __global__ void uniformRand(curandState* state, float* rand) {
-	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	int idx = threadIdx.x + blockIdx.x * blockDim.x; //test
 	rand[idx] = curand_uniform(&state[idx])-0.5;  // Generate the random number from 0.0-1.0
 	printf("%.1f\n", rand[idx]);
 }
