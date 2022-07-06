@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
+#include <curand_kernel.h>
 
 #define SIZE 256
 #define SHMEM_SIZE 256 
@@ -46,48 +47,87 @@ void initialize_vector(int* v, int n) {
 	}
 }
 
+__global__ void initCurand(curandState* state, unsigned long seed) {
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	/* Each thread gets same seed, a different sequence
+	   number, no offset */
+	curand_init(seed, idx, 0, &state[idx]);
+}
+__global__ void uniformRand(curandState* state, float* rand) {
+	int idx = threadIdx.x + blockIdx.x * blockDim.x;
+	rand[idx] = curand_uniform(&state[idx])-0.5;  // Generate the random number from 0.0-1.0
+	printf("%.1f\n", rand[idx]);
+}
+#define DSIZE 10000
 int main() {
-	// Vector size
-	int n = 1 << 16;
-	size_t bytes = n * sizeof(int);
+	// Setup parameters and Initialize variables
+	float* dev_X0;
+	float* dev_U;
+	float* dev_E;
+	float* dev_q;
+	float* dev_qmin;
 
-	// Original vector and result vector
-	int* h_v, * h_v_r;
-	int* d_v, * d_v_r;
+	float host_X0[] = { 0.0f, 0.0f, 0.0f, 2.0f };
+	float host_U0[] = { 0.0f, 0.0f };
 
-	// Allocate memory
-	h_v = (int*)malloc(bytes);
-	h_v_r = (int*)malloc(bytes);
-	cudaMalloc(&d_v, bytes);
-	cudaMalloc(&d_v_r, bytes);
+	float* h_a1, * d_a1;
+	curandState* devState;
 
-	// Initialize vector
-	initialize_vector(h_v, n);
+	h_a1 = (float*)malloc(DSIZE * sizeof(float));
+	cudaMalloc((void**)&d_a1, DSIZE * sizeof(float));
+	cudaMalloc((void**)&devState, DSIZE * sizeof(curandState));
 
-	// Copy to device
-	cudaMemcpy(d_v, h_v, bytes, cudaMemcpyHostToDevice);
+	initCurand << <100, 100 >> > (devState, 1);
+	cudaDeviceSynchronize();
+	uniformRand << <100, 100 >> > (devState, d_a1);
+	cudaDeviceSynchronize();
+	cudaMemcpy(h_a1, d_a1, DSIZE * sizeof(float), cudaMemcpyDeviceToHost);
 
-	// TB Size
-	int TB_SIZE = SIZE;
+	printf("returned random value is %.1f %.1f %.1f\n", h_a1[0],h_a1[1],h_a1[2]);
 
-	// Grid Size (cut in half) (No padding)
-	int GRID_SIZE = (n + TB_SIZE - 1) / TB_SIZE / 2;
 
-	// Call kernel
-	sum_reduction << <GRID_SIZE, TB_SIZE >> > (d_v, d_v_r);
 
-	sum_reduction << <1, TB_SIZE >> > (d_v_r, d_v_r);
+	//// Vector size
+	//int n = 1 << 16;
+	//size_t bytes = n * sizeof(int);
 
-	// Copy to host;
-	cudaMemcpy(h_v_r, d_v_r, bytes, cudaMemcpyDeviceToHost);
+	//// Original vector and result vector
+	//int* h_v, * h_v_r;
+	//int* d_v, * d_v_r;
 
-	// Print the result
-	//printf("Accumulated result is %d \n", h_v_r[0]);
-	//scanf("Press enter to continue: ");
-	printf("result: %d\n", h_v_r[0]);
-	assert(h_v_r[0] == 65536 * 2);
+	//// Allocate memory
+	//h_v = (int*)malloc(bytes);
+	//h_v_r = (int*)malloc(bytes);
+	//cudaMalloc(&d_v, bytes);
+	//cudaMalloc(&d_v_r, bytes);
 
-	printf("COMPLETED SUCCESSFULLY\n");
+	//// Initialize vector
+	//initialize_vector(h_v, n);
+
+	//// Copy to device
+	//cudaMemcpy(d_v, h_v, bytes, cudaMemcpyHostToDevice);
+
+	//// TB Size
+	//int TB_SIZE = SIZE;
+
+	//// Grid Size (cut in half) (No padding)
+	//int GRID_SIZE = (n + TB_SIZE - 1) / TB_SIZE / 2;
+
+	//// Call kernel
+	//sum_reduction << <GRID_SIZE, TB_SIZE >> > (d_v, d_v_r);
+
+	//sum_reduction << <1, TB_SIZE >> > (d_v_r, d_v_r);
+
+	//// Copy to host;
+	//cudaMemcpy(h_v_r, d_v_r, bytes, cudaMemcpyDeviceToHost);
+
+	//// Print the result
+	////printf("Accumulated result is %d \n", h_v_r[0]);
+	////scanf("Press enter to continue: ");
+	//printf("result: %d\n", h_v_r[0]);
+	//assert(h_v_r[0] == 65536 * 2);
+
+	//printf("COMPLETED SUCCESSFULLY\n");
 
 	return 0;
 }

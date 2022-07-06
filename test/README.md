@@ -18,7 +18,7 @@ large matrix calculations.
     2. Generate the states for all rollouts at each predicted time horizon
     3. Calculate the state cost of each state in the state matrix
     4. Do sum reduction once to get cost of each rollout (first element of each row)
-    5. Find the min of the costs (for weight calculation)
+    5. Find the min of the costs (for weight calculation, can use thrust::min_element)
     6. Calculate w_tilde and eta (using sum reduction twice)
     7. Generate control sequence using the calculated weight (multiplication + sum reduction)
 5. update the predicted state and control
